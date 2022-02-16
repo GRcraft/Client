@@ -3,7 +3,6 @@ buildscript {
         mavenLocal()
         maven { url = 'https://maven.minecraftforge.net' }
         maven { url = 'https://ajoberstar.org/bintray-backup/'}
-        maven { url = 'https://maven.pkg.github.com/GRcraft/gitpatcher' }
         mavenCentral()
     }
     dependencies {
@@ -41,13 +40,6 @@ ext {
 repositories {
     mavenCentral()
     maven { url = 'https://jitpack.io' }
-    maven {
-        url = uri("https://maven.pkg.github.com/GRcraft/gitpatcher")
-        credentials {
-            username = project.findProperty("gpr.user") ?: System.getenv("USERNAME")
-            password = project.findProperty("gpr.key") ?: System.getenv("TOKEN")
-        }
-    }
 }
 
 dependencies {
@@ -59,7 +51,6 @@ dependencies {
 //    compile 'package-here'
     implementation 'com.louwrenstechnologies:open-mod-loader:1.2.1'
     implementation 'com.github.JnCrMx:discord-game-sdk4j:0.5.4'
-    implementation 'org.cadixdev.gradle.gitpatcher:gitpatcher:0.10.0.0-SNAPSHOT'
 
     shade 'com.github.JnCrMx:discord-game-sdk4j:0.5.4'
     shade 'com.louwrenstechnologies:open-mod-loader:1.2.1'
@@ -129,6 +120,42 @@ task copyAssets {
     copy {
         from downloadAssets.output.path
         into 'run/assets'
+    }
+}
+
+task applyPatchesGR(type: Exec) {
+    group = "GR"
+    description = "Applies the patches for the project"
+
+    workingDir 'src'
+    commandLine 'sh', 'apply.sh/apply.sh'
+}
+
+task genPatchesGR(type: Exec) {
+    group = "GR"
+    description = "Generates the patches for the project"
+
+    workingDir 'src/patches'
+    commandLine 'git', 'format-patch', '-1', 'HEAD'
+}
+
+task deletePatchesGR(type: Delete) {
+    group = "GR"
+    description = "Clean the patches for the project"
+    dependsOn ':genPatchesGR'
+
+    delete 'patches'
+}
+
+task copyPatchesGR(){
+    group = "GR"
+    description = "Copies the patches from the git repo"
+    dependsOn genPatchesGR
+
+    doLast {
+        for (file in new File("src/patches").listFiles()) {
+            file.renameTo(new File("patches/" + file.name))
+        }
     }
 }
 
