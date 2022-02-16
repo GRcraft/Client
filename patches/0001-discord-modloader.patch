@@ -1,0 +1,780 @@
+From d5abc59721aa290886dc8d77410fd68a735c1b94 Mon Sep 17 00:00:00 2001
+From: Gersom <52709196+GersomR-afk@users.noreply.github.com>
+Date: Wed, 16 Feb 2022 13:51:43 +0100
+Subject: [PATCH] discord + modloader
+
+---
+ .gitignore                                    |   2 +
+ apply.sh                                      |   1 +
+ main/java/mcp/client/Start.java               |  29 ++-
+ main/java/me/grplayer/ActivityStatus.java     |  16 ++
+ main/java/me/grplayer/DiscordManager.java     | 178 ++++++++++++++++
+ .../java/me/grplayer/NativeLibraryLoader.java |  68 ++++++
+ main/java/me/grplayer/Utilities.java          |  33 +++
+ main/java/net/minecraft/client/Camera.java    |   2 +-
+ main/java/net/minecraft/client/Minecraft.java | 194 ++++++++++++++----
+ .../repository/FolderRepositorySource.java    |  16 +-
+ .../server/packs/repository/Pack.java         |   1 +
+ 11 files changed, 500 insertions(+), 40 deletions(-)
+ create mode 100644 .gitignore
+ create mode 160000 apply.sh
+ create mode 100644 main/java/me/grplayer/ActivityStatus.java
+ create mode 100644 main/java/me/grplayer/DiscordManager.java
+ create mode 100644 main/java/me/grplayer/NativeLibraryLoader.java
+ create mode 100644 main/java/me/grplayer/Utilities.java
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..963893c
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,2 @@
++# Developers should get their own Discord Game SDK.
++resources/discord/
+\ No newline at end of file
+diff --git a/apply.sh b/apply.sh
+new file mode 160000
+index 0000000..0fb69e4
+--- /dev/null
++++ b/apply.sh
+@@ -0,0 +1 @@
++Subproject commit 0fb69e407dec5680ad2d2dce8585edddc155dd95
+diff --git a/main/java/mcp/client/Start.java b/main/java/mcp/client/Start.java
+index f721734..703829b 100644
+--- a/main/java/mcp/client/Start.java
++++ b/main/java/mcp/client/Start.java
+@@ -1,8 +1,13 @@
+ package mcp.client;
+ 
++import java.io.File;
++import java.io.IOException;
+ import java.util.Arrays;
++import java.util.Random;
++import java.util.UUID;
+ 
+ import net.minecraft.client.main.Main;
++import org.apache.commons.io.FileUtils;
+ 
+ public class Start
+ {
+@@ -13,8 +18,30 @@ public class Start
+          * --version is just used as 'launched version' in snoop data and is required
+          * Working directory is used as gameDir if not provided
+          */
++
++        // Used in development, to log in with a genuine Minecraft account.
++        String username = "Player"+new Random().nextInt(0,999);
++        String accessToken = "0";
++        String uuid = UUID.randomUUID().toString();
++        String clientId = "0";
++
++        File secretFile = new File(System.getProperty("user.home"), ".minecraft/donotshare.txt");
++        if (secretFile.exists()) {
++            try {
++                String data = FileUtils.readFileToString(secretFile);
++                username = data.split(":")[0];
++                accessToken = data.split(":")[1];
++                uuid = data.split(":")[2];
++                clientId = data.split(":")[3];
++            } catch (IOException e) {
++                e.printStackTrace();
++            }
++        }
++
++        System.out.println("Launching with: " + username+":"+accessToken+":"+uuid);
++
+         String assets = System.getenv().containsKey("assetDirectory") ? System.getenv("assetDirectory") : "assets";
+-        Main.main(concat(new String[]{"--version", "mcp", "--accessToken", "0", "--assetsDir", assets, "--assetIndex", "1.18", "--userProperties", "{}"}, args));
++        Main.main(concat(new String[]{"--version", "mcp", "--accessToken", accessToken, "--username", username, "--uuid", uuid, "--clientId", clientId, "--assetsDir", assets, "--assetIndex", "1.18", "--userProperties", "{}"}, args));
+     }
+ 
+     public static <T> T[] concat(T[] first, T[] second)
+diff --git a/main/java/me/grplayer/ActivityStatus.java b/main/java/me/grplayer/ActivityStatus.java
+new file mode 100644
+index 0000000..d9ae987
+--- /dev/null
++++ b/main/java/me/grplayer/ActivityStatus.java
+@@ -0,0 +1,16 @@
++//
++// Source code recreated from a .class file by IntelliJ IDEA
++// (powered by FernFlower decompiler)
++//
++
++package me.grplayer;
++
++public enum ActivityStatus {
++    TITLE_SCREEN,
++    SETTINGS_SCREEN,
++    SINGLE_PLAYER,
++    REALM,
++    MULTIPLAYER,
++    IDLE,
++    UNKNOWN;
++}
+\ No newline at end of file
+diff --git a/main/java/me/grplayer/DiscordManager.java b/main/java/me/grplayer/DiscordManager.java
+new file mode 100644
+index 0000000..e98a2fd
+--- /dev/null
++++ b/main/java/me/grplayer/DiscordManager.java
+@@ -0,0 +1,178 @@
++//
++// Source code recreated from a .class file by IntelliJ IDEA
++// (powered by FernFlower decompiler)
++//
++
++package me.grplayer;
++
++import de.jcm.discordgamesdk.Core;
++import de.jcm.discordgamesdk.CreateParams;
++import de.jcm.discordgamesdk.activity.Activity;
++import java.io.File;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.time.Instant;
++import java.util.Base64;
++
++import net.minecraft.client.Minecraft;
++import net.minecraft.client.gui.screens.MouseSettingsScreen;
++import net.minecraft.client.gui.screens.TitleScreen;
++import net.minecraft.client.multiplayer.ClientPacketListener;
++import net.minecraft.network.Connection;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import org.jetbrains.annotations.NotNull;
++
++/**
++ * Class used to interact with Discord Game SDK. Currently only reports the current game activity.
++ * Any PRs are welcome!
++ * @author Gersom
++ */
++public class DiscordManager {
++    private static final Logger LOGGER = LogManager.getLogger();
++    private static final String TITLE_SCREEN_CLASS_NAME = TitleScreen.class.getName();
++    private static final String SETTINGS_SCREEN_CLASS_NAME = MouseSettingsScreen.class.getName();
++    private File discordLibrary;
++    private Thread activityThread;
++    private final Instant startTime = Instant.now();
++
++    public DiscordManager() throws IOException {
++        this.init();
++    }
++
++    private void init() throws IOException {
++        NativeLibraryLoader nativeLibraryLoader = new NativeLibraryLoader();
++        this.discordLibrary = nativeLibraryLoader.getFile();
++        Core.init(this.discordLibrary);
++        LOGGER.info("Loaded Discord library from path: " + this.discordLibrary.getAbsolutePath());
++    }
++
++    public void setupActivity() {
++        this.activityThread = new Thread(() -> {
++            ActivityStatus activityStatus = this.determineActivityStatus();
++            CreateParams params = new CreateParams();
++
++            try {
++                params.setClientID(862288572585738270L);
++                params.setFlags(CreateParams.getDefaultFlags());
++                Core core = new Core(params);
++
++                try {
++                    Activity activity = this.createActivity(activityStatus);
++                    core.activityManager().updateActivity(activity);
++
++                    while(true) {
++                        ActivityStatus previousActivityStatus = activityStatus;
++                        activityStatus = this.determineActivityStatus();
++                        if (activityStatus != previousActivityStatus) {
++                            LOGGER.info("ActivityStatus status changed to: " + activityStatus);
++                            activity = this.createActivity(activityStatus);
++                            core.activityManager().updateActivity(activity);
++                            if(activityStatus == ActivityStatus.MULTIPLAYER) {
++                                LOGGER.info("Refreshing activity every second");
++                                Thread.sleep(1000L);
++                                previousActivityStatus = ActivityStatus.IDLE;
++                            }
++                        }
++
++                        core.runCallbacks();
++
++                        try {
++                            Thread.sleep(16L);
++                        } catch (InterruptedException ex) {
++                            ex.printStackTrace();
++                        }
++                    }
++                } catch (Exception e) {
++                    core.close();
++
++                    e.printStackTrace();
++                }
++            } catch (Exception e) {
++                params.close();
++
++                e.printStackTrace();
++            }
++        });
++        this.activityThread.start();
++    }
++
++    private @NotNull Activity createActivity(@NotNull ActivityStatus activityStatus) {
++        Activity activity = new Activity();
++
++        activity.setDetails("Playing G_Rcraft");
++        activity.timestamps().setStart(this.startTime);
++        activity.assets().setLargeImage("head-512x512");
++        if(activityStatus == ActivityStatus.IDLE) {
++            activity.setState("Idling");
++        }else if(activityStatus == ActivityStatus.SINGLE_PLAYER) {
++            activity.setState("Singleplayer");
++            activity.assets().setLargeImage("singleplayer");
++        }else if(activityStatus == ActivityStatus.MULTIPLAYER) {
++            if(!Minecraft.getInstance().isConnectedToRealms()) {
++                if (!Minecraft.getInstance().getCurrentServer().isLan()) {
++                    activity.setState("Server: " + Minecraft.getInstance().getCurrentServer().ip);
++                    try {
++                        int onlinePlayers = Minecraft.getInstance().player.getServer().getPlayerCount();
++                        int maxPlayers = Minecraft.getInstance().player.getServer().getMaxPlayers();
++
++                        activity.party().setID(Minecraft.getInstance().getCurrentServer().ip);
++                        activity.party().size().setCurrentSize(onlinePlayers);
++                        activity.party().size().setMaxSize(maxPlayers);
++
++                        String secret = Base64.getEncoder().encodeToString(Minecraft.getInstance().getCurrentServer().ip.getBytes(StandardCharsets.UTF_8));
++                        activity.secrets().setJoinSecret(secret);
++                        activity.secrets().setMatchSecret(secret + "1");
++                        activity.secrets().setSpectateSecret(secret + "2");
++                    } catch (Exception e) {
++                        e.printStackTrace();
++                    }
++                } else {
++                    activity.setState("Lan: ");
++                }
++            }else {
++                activity.setState("Realm");
++            }
++        }else if (activityStatus == ActivityStatus.TITLE_SCREEN) {
++            activity.setState("At the title screen");
++        }else if (activityStatus == ActivityStatus.SETTINGS_SCREEN) {
++            activity.setState("At the options menu");
++        }
++        return activity;
++    }
++
++    private ActivityStatus determineActivityStatus() {
++        if (Minecraft.getInstance().isPaused()) {
++            return ActivityStatus.IDLE;
++        } else if (Minecraft.getInstance().isConnectedToRealms()) {
++            return ActivityStatus.REALM;
++        } else if (Minecraft.getInstance().getCurrentServer() != null) {
++            return ActivityStatus.MULTIPLAYER;
++        } else {
++            ClientPacketListener packetListener = Minecraft.getInstance().getConnection();
++            if (packetListener != null) {
++                Connection connection = packetListener.getConnection();
++                if (connection.isMemoryConnection()) {
++                    return ActivityStatus.SINGLE_PLAYER;
++                }
++            }
++
++            if (Minecraft.getInstance().screen != null) {
++                if (TITLE_SCREEN_CLASS_NAME.equals(Minecraft.getInstance().screen.getClass().getName())) {
++                    return ActivityStatus.TITLE_SCREEN;
++                }
++
++                if (SETTINGS_SCREEN_CLASS_NAME.equals(Minecraft.getInstance().screen.getClass().getName())) {
++                    return ActivityStatus.SETTINGS_SCREEN;
++                }
++            }
++
++            return ActivityStatus.UNKNOWN;
++        }
++    }
++
++    public void close() {
++        LOGGER.info("Closing the on-going activity thread");
++        this.activityThread.stop();
++    }
++}
+\ No newline at end of file
+diff --git a/main/java/me/grplayer/NativeLibraryLoader.java b/main/java/me/grplayer/NativeLibraryLoader.java
+new file mode 100644
+index 0000000..73dddbf
+--- /dev/null
++++ b/main/java/me/grplayer/NativeLibraryLoader.java
+@@ -0,0 +1,68 @@
++//
++// Source code recreated from a .class file by IntelliJ IDEA
++// (powered by FernFlower decompiler)
++//
++
++package me.grplayer;
++
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.file.CopyOption;
++import java.nio.file.Files;
++import java.util.Locale;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import org.jetbrains.annotations.NotNull;
++
++public class NativeLibraryLoader {
++    private final Logger LOGGER = LogManager.getLogger();
++
++    public NativeLibraryLoader() {
++    }
++
++    public File getFile() throws IOException {
++        String fileName = "discord/" + this.determineFileName();
++        InputStream stream = Thread.currentThread().getContextClassLoader().getResourceAsStream(fileName);
++        if (stream == null) {
++            this.LOGGER.warn("Could not find native library: " + fileName);
++            this.LOGGER.warn("Fallback to loading from runtime folder");
++            stream = Files.newInputStream((new File(fileName)).toPath());
++            if (stream == null) {
++                throw new IOException("Could not find native library: " + fileName);
++            }
++        }
++
++        File nativeFile = File.createTempFile("discord_game_sdk", ".tmp");
++        nativeFile.delete();
++        Files.copy(stream, nativeFile.toPath(), new CopyOption[0]);
++        nativeFile.deleteOnExit();
++        return nativeFile;
++    }
++
++    @NotNull
++    private String determineFileName() {
++        String name = "discord_game_sdk";
++        String osName = System.getProperty("os.name").toLowerCase(Locale.ROOT);
++        String arch = System.getProperty("os.arch").toLowerCase(Locale.ROOT);
++        String suffix;
++        if (osName.contains("windows")) {
++            suffix = ".dll";
++        } else if (osName.contains("linux")) {
++            suffix = ".so";
++        } else {
++            if (!osName.contains("mac os")) {
++                throw new RuntimeException("cannot determine OS type: " + osName);
++            }
++
++            suffix = ".dylib";
++        }
++
++        if (arch.equals("amd64")) {
++            arch = "x86_64";
++        }
++
++        String path = "lib/" + arch + "/" + name + suffix;
++        return path;
++    }
++}
+\ No newline at end of file
+diff --git a/main/java/me/grplayer/Utilities.java b/main/java/me/grplayer/Utilities.java
+new file mode 100644
+index 0000000..4d90352
+--- /dev/null
++++ b/main/java/me/grplayer/Utilities.java
+@@ -0,0 +1,33 @@
++package me.grplayer;
++
++import java.io.File;
++
++public class Utilities {
++
++    /**
++     * Hides a file.
++     * @param file The file to hide.
++     */
++    public static void hideFile(File file) {
++        switch (System.getProperty("os.name")) {
++            case "Linux":
++            case "Mac OS X":
++                try {
++                    Runtime.getRuntime().exec("chmod -R 000 " + file.getAbsolutePath());
++                } catch (Exception e) {
++                    e.printStackTrace();
++                }
++                break;
++            case "Windows":
++                try {
++                    Runtime.getRuntime().exec("attrib +h " + file.getAbsolutePath());
++                }catch (Exception e) {
++                    e.printStackTrace();
++                }
++                break;
++            default:
++                throw new UnsupportedOperationException("Unsupported OS");
++        }
++    }
++
++}
+diff --git a/main/java/net/minecraft/client/Camera.java b/main/java/net/minecraft/client/Camera.java
+index 38cd4bd..b7bcace 100644
+--- a/main/java/net/minecraft/client/Camera.java
++++ b/main/java/net/minecraft/client/Camera.java
+@@ -114,7 +114,7 @@ public class Camera {
+       this.setPosition(new Vec3(p_90585_, p_90586_, p_90587_));
+    }
+ 
+-   protected void setPosition(Vec3 p_90582_) {
++   public void setPosition(Vec3 p_90582_) {
+       this.position = p_90582_;
+       this.blockPosition.set(p_90582_.x, p_90582_.y, p_90582_.z);
+    }
+diff --git a/main/java/net/minecraft/client/Minecraft.java b/main/java/net/minecraft/client/Minecraft.java
+index 3b133ca..35c3252 100644
+--- a/main/java/net/minecraft/client/Minecraft.java
++++ b/main/java/net/minecraft/client/Minecraft.java
+@@ -4,6 +4,8 @@ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+ import com.google.common.collect.Queues;
+ import com.google.gson.JsonElement;
++import com.louwrenstechnologies.Mod;
++import com.louwrenstechnologies.ModLoader;
+ import com.mojang.authlib.AuthenticationService;
+ import com.mojang.authlib.GameProfile;
+ import com.mojang.authlib.GameProfileRepository;
+@@ -34,24 +36,17 @@ import com.mojang.math.Matrix4f;
+ import com.mojang.serialization.DataResult;
+ import com.mojang.serialization.JsonOps;
+ import com.mojang.serialization.Lifecycle;
+-import java.io.File;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.io.UncheckedIOException;
++
++import java.io.*;
++import java.lang.reflect.InvocationTargetException;
+ import java.net.Proxy;
+ import java.net.SocketAddress;
+ import java.nio.ByteBuffer;
+-import java.nio.file.Path;
+-import java.nio.file.Paths;
++import java.nio.file.*;
+ import java.text.DecimalFormat;
+ import java.text.DecimalFormatSymbols;
+ import java.text.SimpleDateFormat;
+-import java.util.Collections;
+-import java.util.Date;
+-import java.util.List;
+-import java.util.Locale;
+-import java.util.Queue;
+-import java.util.UUID;
++import java.util.*;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.atomic.AtomicReference;
+@@ -60,6 +55,8 @@ import java.util.function.Function;
+ import java.util.function.Supplier;
+ import java.util.stream.Stream;
+ import javax.annotation.Nullable;
++
++import me.grplayer.DiscordManager;
+ import net.minecraft.ChatFormatting;
+ import net.minecraft.CrashReport;
+ import net.minecraft.CrashReportCategory;
+@@ -77,27 +74,11 @@ import net.minecraft.client.gui.components.toasts.SystemToast;
+ import net.minecraft.client.gui.components.toasts.ToastComponent;
+ import net.minecraft.client.gui.components.toasts.TutorialToast;
+ import net.minecraft.client.gui.font.FontManager;
+-import net.minecraft.client.gui.screens.BackupConfirmScreen;
+-import net.minecraft.client.gui.screens.ChatScreen;
+-import net.minecraft.client.gui.screens.ConfirmScreen;
+-import net.minecraft.client.gui.screens.ConnectScreen;
+-import net.minecraft.client.gui.screens.DatapackLoadFailureScreen;
+-import net.minecraft.client.gui.screens.DeathScreen;
+-import net.minecraft.client.gui.screens.GenericDirtMessageScreen;
+-import net.minecraft.client.gui.screens.InBedChatScreen;
+-import net.minecraft.client.gui.screens.LevelLoadingScreen;
+-import net.minecraft.client.gui.screens.LoadingOverlay;
+-import net.minecraft.client.gui.screens.MenuScreens;
+-import net.minecraft.client.gui.screens.OutOfMemoryScreen;
+-import net.minecraft.client.gui.screens.Overlay;
+-import net.minecraft.client.gui.screens.PauseScreen;
+-import net.minecraft.client.gui.screens.ProgressScreen;
+-import net.minecraft.client.gui.screens.Screen;
+-import net.minecraft.client.gui.screens.TitleScreen;
+-import net.minecraft.client.gui.screens.WinScreen;
++import net.minecraft.client.gui.screens.*;
+ import net.minecraft.client.gui.screens.advancements.AdvancementsScreen;
+ import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+ import net.minecraft.client.gui.screens.inventory.InventoryScreen;
++import net.minecraft.client.gui.screens.packs.PackSelectionScreen;
+ import net.minecraft.client.gui.screens.recipebook.RecipeCollection;
+ import net.minecraft.client.gui.screens.social.PlayerSocialManager;
+ import net.minecraft.client.gui.screens.social.SocialInteractionsScreen;
+@@ -185,11 +166,7 @@ import net.minecraft.server.level.progress.StoringChunkProgressListener;
+ import net.minecraft.server.packs.PackResources;
+ import net.minecraft.server.packs.PackType;
+ import net.minecraft.server.packs.metadata.pack.PackMetadataSection;
+-import net.minecraft.server.packs.repository.FolderRepositorySource;
+-import net.minecraft.server.packs.repository.Pack;
+-import net.minecraft.server.packs.repository.PackRepository;
+-import net.minecraft.server.packs.repository.PackSource;
+-import net.minecraft.server.packs.repository.ServerPacksSource;
++import net.minecraft.server.packs.repository.*;
+ import net.minecraft.server.packs.resources.ReloadableResourceManager;
+ import net.minecraft.server.packs.resources.ResourceManager;
+ import net.minecraft.server.packs.resources.SimpleReloadableResourceManager;
+@@ -249,12 +226,13 @@ import net.minecraft.world.phys.HitResult;
+ import net.minecraftforge.api.distmarker.Dist;
+ import net.minecraftforge.api.distmarker.OnlyIn;
+ import org.apache.commons.io.FileUtils;
++import org.apache.commons.io.IOUtils;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.lwjgl.util.tinyfd.TinyFileDialogs;
+ 
+ @OnlyIn(Dist.CLIENT)
+-public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements WindowEventHandler {
++public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements WindowEventHandler, com.louwrenstechnologies.Game {
+    private static Minecraft instance;
+    private static final Logger LOGGER = LogManager.getLogger();
+    public static final boolean ON_OSX = Util.getPlatform() == Util.OS.OSX;
+@@ -384,6 +362,9 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements
+    private final ResourceLoadStateTracker reloadStateTracker = new ResourceLoadStateTracker();
+    private String debugPath = "root";
+ 
++   private final ModLoader loader = new ModLoader(this);
++   private DiscordManager discordManager;
++
+    public Minecraft(GameConfig p_91084_) {
+       super("Client");
+       instance = this;
+@@ -537,21 +518,50 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements
+       LoadingOverlay.registerTextures(this);
+       List<PackResources> list = this.resourcePackRepository.openAllSelected();
+       this.reloadStateTracker.startReload(ResourceLoadStateTracker.ReloadReason.INITIAL, list);
++      List<String> classNames = new ArrayList<>();
++
+       this.setOverlay(new LoadingOverlay(this, this.resourceManager.createReload(Util.backgroundExecutor(), this, RESOURCE_RELOAD_INITIAL_TASK, list), (p_91245_) -> {
+          Util.ifElse(p_91245_, this::rollbackResourcePacks, () -> {
+             if (SharedConstants.IS_RUNNING_IN_IDE) {
+                this.selfTest();
+             }
+ 
++            // Discord stuff
++            try {
++               this.discordManager = new DiscordManager();
++               this.discordManager.setupActivity();
++            } catch (IOException e) {
++               e.printStackTrace();
++            }
++
++            // Load all mods
++            File modDir = new File(this.gameDirectory, "mods");
++            if(!modDir.exists()) {
++               modDir.mkdir();
++               LOGGER.info("Created mod directory");
++            }
++
++            LOGGER.info("Loading mods...");
++
++            File[] modFiles = modDir.listFiles();
++
++            for(File modFile : modFiles) {
++               try {
++                  loader.loadMod(modFile);
++               } catch (IOException | ClassNotFoundException | InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
++                  e.printStackTrace();
++               }
++            }
++
+             this.reloadStateTracker.finishReload();
+          });
+       }, false));
++
+       if (s != null) {
+          ConnectScreen.startConnecting(new TitleScreen(), this, new ServerAddress(s, i), (ServerData)null);
+       } else {
+          this.setScreen(new TitleScreen(true));
+       }
+-
+    }
+ 
+    public void updateTitle() {
+@@ -956,6 +966,7 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements
+          this.paintingTextures.close();
+          this.textureManager.close();
+          this.resourceManager.close();
++         this.discordManager.close();
+          Util.shutdownExecutors();
+       } catch (Throwable throwable) {
+          LOGGER.error("Shutdown failure!", throwable);
+@@ -1683,6 +1694,102 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements
+       this.profiler.popPush("keyboard");
+       this.keyboardHandler.tick();
+       this.profiler.pop();
++
++      // Tick all mods
++      this.loader.tick();
++   }
++
++   @Override
++   public void shutDown() {
++
++   }
++
++   @Override
++   public boolean processResource(String identifier, InputStream data) {
++      UUID modId = UUID.fromString(identifier.split(":")[0]);
++      String resource = identifier.split(":")[1];
++      LOGGER.info("Processing resource {} loaded by {}", resource, modId);
++      if(resource.equals("pack.zip")) {
++         LOGGER.info("Loading pack from {}", modId);
++         try {
++            byte[] bytes = IOUtils.toByteArray(data);
++            File file = Files.createTempFile(this.resourcePackDirectory.toPath(), modId.toString(), ".zip").toFile();
++            file.deleteOnExit();
++
++            Files.copy(new ByteArrayInputStream(bytes), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
++            file.setWritable(false);
++            file.setLastModified(0L);
++
++            this.options.resourcePacks.add("file/" + file.getName());
++            this.options.save();
++
++            this.resourcePackRepository.reload();
++
++            this.resourcePackRepository.getAvailablePacks().forEach(pack -> {{
++               if(pack.getId().equals("file/" + file.getName())) {
++                  if (pack.getCompatibility().equals(PackCompatibility.COMPATIBLE) && this.resourcePackRepository.isAvailable(pack.getId())) {
++                     LOGGER.info("Selecting pack {}...", pack.getId());
++                     Collection<String> currentPacks = this.options.resourcePacks;
++
++                     List<String> selected = currentPacks.stream().toList();
++                     currentPacks.add(pack.getId());
++
++                     this.resourcePackRepository.setSelected(selected);
++                     LOGGER.info("Pack {} is now selected!", pack.getId());
++                  } else {
++                     LOGGER.warn("Pack {} is not compatible with this version of Minecraft, or is not available.", pack.getId());
++                  }
++               }else {
++                  LOGGER.debug("Pack {} is not a mod pack.", pack.getId());
++               }
++            }});
++
++            // Reload the resource packs
++            this.reloadResourcePacks().thenRun(() -> {
++               LOGGER.info("Pack loaded successfully");
++               new Thread(() -> {
++                  try {
++                     WatchService watchService = FileSystems.getDefault().newWatchService();
++                     resourcePackDirectory.toPath().register(watchService, StandardWatchEventKinds.ENTRY_DELETE);
++                     boolean poll = true;
++                     while (poll) {
++                        WatchKey key = watchService.take();
++                        for (WatchEvent<?> event : key.pollEvents()) {
++                           if(event.context().toString().equals(file.getName())) {
++                              processResource(identifier, new ByteArrayInputStream(bytes));
++                              if(this.screen != null) {
++                                 if (this.screen.getClass().equals(PackSelectionScreen.class)) {
++                                    // If the screen is the pack selection screen, the user might be able to disable the pack, so wee need to close the screen.
++                                    this.screen.onClose();
++                                 }
++                              }else {
++                                 LOGGER.debug("Current screen is null");
++                              }
++                              LOGGER.info("Pack {} was deleted, adding it again!", file.getName());
++                           }else {
++                              LOGGER.debug("Ignoring event {}", event.context());
++                           }
++                        }
++                        poll = key.reset();
++                     }
++
++                  } catch (IOException | InterruptedException e) {
++                     throw new RuntimeException("Cannot listen for pack events!", e);
++                  }
++               }).start();
++            });
++
++            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
++               Minecraft.this.options.resourcePacks.remove("file/" + file.getName());
++               Minecraft.this.options.save();
++            }));
++
++            return true;
++         }catch (IOException e) {
++            throw new RuntimeException("Unable to load pack!", e);
++         }
++      }
++      return false;
+    }
+ 
+    private boolean isMultiplayerServer() {
+@@ -2677,6 +2784,19 @@ public class Minecraft extends ReentrantBlockableEventLoop<Runnable> implements
+       return this.game;
+    }
+ 
++   public boolean isMod(UUID modId) {
++      LOGGER.debug("Checking if mod {} is loaded", modId);
++      for(Mod mod : this.loader.getMods()) {
++         LOGGER.debug("Found mod {}", mod.getId());
++         mod.onEnable();
++         if(mod.getId().equals(modId)) {
++            return true;
++         }
++      }
++
++      return false;
++   }
++
+    @Nullable
+    public StoringChunkProgressListener getProgressListener() {
+       return this.progressListener.get();
+diff --git a/main/java/net/minecraft/server/packs/repository/FolderRepositorySource.java b/main/java/net/minecraft/server/packs/repository/FolderRepositorySource.java
+index 511a8d3..e73847d 100644
+--- a/main/java/net/minecraft/server/packs/repository/FolderRepositorySource.java
++++ b/main/java/net/minecraft/server/packs/repository/FolderRepositorySource.java
+@@ -2,8 +2,11 @@ package net.minecraft.server.packs.repository;
+ 
+ import java.io.File;
+ import java.io.FileFilter;
++import java.util.UUID;
+ import java.util.function.Consumer;
+ import java.util.function.Supplier;
++
++import net.minecraft.client.Minecraft;
+ import net.minecraft.server.packs.FilePackResources;
+ import net.minecraft.server.packs.FolderPackResources;
+ import net.minecraft.server.packs.PackResources;
+@@ -31,7 +34,18 @@ public class FolderRepositorySource implements RepositorySource {
+       if (afile != null) {
+          for(File file1 : afile) {
+             String s = "file/" + file1.getName();
+-            Pack pack = Pack.create(s, false, this.createSupplier(file1), p_10392_, Pack.Position.TOP, this.packSource);
++            boolean required = false;
++            if(file1.getName().endsWith(".zip")) {
++               try {
++                  UUID uuid = UUID.fromString(file1.getName().replace(".zip", "").substring(0, 36));
++                  // Valid UUID, let's check if it's a modpack
++                  required = Minecraft.getInstance().isMod(uuid);
++               }catch (IllegalArgumentException | StringIndexOutOfBoundsException e) {
++                  // ignore
++               }
++            }
++
++            Pack pack = Pack.create(s, required, this.createSupplier(file1), p_10392_, Pack.Position.TOP, this.packSource);
+             if (pack != null) {
+                p_10391_.accept(pack);
+             }
+diff --git a/main/java/net/minecraft/server/packs/repository/Pack.java b/main/java/net/minecraft/server/packs/repository/Pack.java
+index 68e516e..86314eb 100644
+--- a/main/java/net/minecraft/server/packs/repository/Pack.java
++++ b/main/java/net/minecraft/server/packs/repository/Pack.java
+@@ -3,6 +3,7 @@ package net.minecraft.server.packs.repository;
+ import com.mojang.brigadier.arguments.StringArgumentType;
+ import java.io.IOException;
+ import java.util.List;
++import java.util.UUID;
+ import java.util.function.Function;
+ import java.util.function.Supplier;
+ import javax.annotation.Nullable;
+-- 
+2.35.1
+
