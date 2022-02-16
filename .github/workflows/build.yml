@@ -1,0 +1,36 @@
+name: Build with Gradle
+
+on:
+  push:
+    branches: [ 1.18x ]
+  pull_request:
+    branches: [ 1.18x ]
+
+jobs:
+  build:
+    name: Run G_Rcraft
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set git identy
+        run: git config --global user.email "grcrafton@github.com" && git config --global user.name "G_Rcraft Workflow"
+      - uses: actions/checkout@v2
+      - name: Set up JDK 17
+        uses: actions/setup-java@v2
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Setup MCP
+        uses: gradle/gradle-build-action@937999e9cc2425eddc7fd62d1053baf041147db7
+        with:
+          arguments: setup
+      - name: Initialize patches
+        run: cd src && git init && git add . && git commit -m "init"
+      - name: Apply patches
+        uses: gradle/gradle-build-action@937999e9cc2425eddc7fd62d1053baf041147db7
+        with:
+          arguments: applyPatchesGR
+      - name: Build
+        uses: gradle/gradle-build-action@937999e9cc2425eddc7fd62d1053baf041147db7
+        with:
+          arguments: jar
