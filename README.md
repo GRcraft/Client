@@ -4,13 +4,13 @@
 G_Rcraft is a Minecraft: Java Edition client made by [G_Rplayer](https://instagram.com/G_Rplayer) to improve the experience of the game. It is currently in development and is not yet ready for use. There is no guarantee that it will work properly. It is not recommended using it for any other purpose than testing.
 
 ## Installation Guide
-[TBD]
+[Read the installation guide](/docs/users/INSTALLING.md)
 
 ## Mod development
-[TBD]
+[Read the modders guide](/docs/modders/SETUP.md)
 
 ## Contributing
-[TBD]
+[Read the developers guide](/docs/developers/SETUP.md)
 
 ## Credits
 This projects is made possible by the [G_Rcraft Authors](https://github.com/GRcraft/Client/graphs/contributors).
